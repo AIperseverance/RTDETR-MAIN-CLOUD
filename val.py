@@ -17,15 +17,15 @@ def get_weight_size(path):
     return f'{stats.st_size / 1024 / 1024:.1f}'
 
 if __name__ == '__main__':
-    model_path = 'D:\\RT-DETR\\RTDETR-20260526\\RTDETR-main\\runs\\train\\exp_2026_06_17_rtdetr-ASF_P2_300epoch\\weights\\best.pt'
+    model_path = '/home/waas/results/train/exp_2026_06_23_rtdetr-CascadedGroupAttention_300epoch/weights/best.pt'
     model = RTDETR(model_path) # 选择训练好的权重路径
-    result = model.val(data='D:/RT-DETR/HIT-UAV/data.yaml',
+    result = model.val(data='/home/waas/datasets/data.yaml',
                       split='test', # split可以选择train、val、test 根据自己的数据集情况来选择.
                       imgsz=640,
                       batch=4,
                     #   save_json=True, # if you need to cal coco metrice
                       project='runs/val',
-                      name='exp_2026_06_17_rtdetr-ASF_P2_300epoch',
+                      name='exp_2026_06_23_rtdetr-CascadedGroupAttention_300epoch',
                       )
     if model.task == 'detect': # 仅目标检测任务适用
         length = result.box.p.size

@@ -17,9 +17,9 @@ from ultralytics import RTDETR
 # 但是在val.py的时候精度为0，所以统一改成fp32，原则上没影响，只是存储的位数变多了。
 
 if __name__ == '__main__':
-    model = RTDETR('ultralytics/cfg/models/rt-detr/rtdetr-ReCalibrationFPN-P2345.yaml')
-    model.load('D:/RT-DETR/RTDETR-20260526/RTDETR-main/weights/rtdetr-r18.pt') # loading pretrain weights
-    model.train(data='D:/RT-DETR/HIT-UAV/data.yaml',
+    model = RTDETR('/home/waas/workspace/RTDETR-MAIN-CLOUD/ultralytics/cfg/models/rt-detr/rtdetr-FreqFFPN-CascadedGroupAttention.yaml')
+    model.load('/home/waas/weights/rtdetr-r18.pt') # loading pretrain weights
+    model.train(data='/home/waas/datasets/data.yaml',
                 cache=False,
                 imgsz=640,
                 epochs=300,
@@ -29,5 +29,5 @@ if __name__ == '__main__':
                 # resume='', # last.pt path
                 patience=30, # 设置0代表不早提供，设置30代表精度持续30epoch没有比之前最高的高就早停
                 project='runs/train',
-                name='exp_2026_06_18_rtdetr-ReCalibrationFPN-P2345_300epoch',
+                name='exp_2026_06_24_rtdetr-FreqFFPN-CascadedGroupAttention_300epoch',
                 )
