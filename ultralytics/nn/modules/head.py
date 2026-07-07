@@ -14,7 +14,7 @@ from .conv import Conv
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
 from .utils import bias_init_with_prob, linear_init_
 
-__all__ = 'Detect', 'Segment', 'Pose', 'Classify', 'RTDETRDecoder'
+__all__ = 'Detect', 'Segment', 'Pose', 'Classify', 'RTDETRDecoder', 'RTDETRDecoder_SAQE', 'RTDETRDecoder_MSAQE'
 
 
 class Detect(nn.Module):
@@ -394,3 +394,170 @@ class RTDETRDecoder(nn.Module):
         xavier_uniform_(self.query_pos_head.layers[1].weight)
         for layer in self.input_proj:
             xavier_uniform_(layer[0].weight)
+
+
+class RTDETRDecoder_SAQE(RTDETRDecoder):
+    """RT-DETR decoder with small-object-aware query enhancement."""
+
+    def __init__(
+            self,
+            nc=80,
+            ch=(512, 1024, 2048),
+            hd=256,
+            nq=300,
+            ndp=4,
+            nh=8,
+            ndl=6,
+            query_small_alpha=0.05,
+            d_ffn=1024,
+            eval_idx=-1,
+            dropout=0.,
+            act=nn.ReLU(),
+            nd=100,
+            label_noise_ratio=0.5,
+            box_noise_scale=1.0,
+            learnt_init_query=False):
+        super().__init__(nc, ch, hd, nq, ndp, nh, ndl, d_ffn, eval_idx, dropout, act, nd, label_noise_ratio,
+                         box_noise_scale, learnt_init_query)
+        self.query_small_alpha = query_small_alpha
+
+    def _get_decoder_input(self, feats, shapes, dn_embed=None, dn_bbox=None):
+        """Select decoder queries with a mild prior for small predicted boxes."""
+        bs = len(feats)
+        anchors, valid_mask = self._generate_anchors(shapes, dtype=feats.dtype, device=feats.device)
+        features = self.enc_output(valid_mask * feats)  # bs, h*w, 256
+
+        enc_outputs_scores = self.enc_score_head(features)  # (bs, h*w, nc)
+
+        # Small-object-aware query selection. Classification confidence remains dominant,
+        # while the small-box prior increases the chance that tiny targets enter the decoder.
+        cls_score = enc_outputs_scores.sigmoid().max(-1).values
+        proposal_logits = self.enc_bbox_head(features) + anchors
+        proposal_bbox = proposal_logits.sigmoid()
+        proposal_area = proposal_bbox[..., 2].clamp(min=1e-6) * proposal_bbox[..., 3].clamp(min=1e-6)
+        small_prior = 1.0 - torch.sqrt(proposal_area).clamp(max=1.0)
+        query_score = cls_score + self.query_small_alpha * small_prior
+        query_score = query_score.masked_fill(~valid_mask.squeeze(-1), -float('inf'))
+
+        topk_ind = torch.topk(query_score, self.num_queries, dim=1).indices.view(-1)
+        batch_ind = torch.arange(end=bs, dtype=topk_ind.dtype, device=feats.device).unsqueeze(-1).repeat(
+            1, self.num_queries).view(-1)
+
+        top_k_features = features[batch_ind, topk_ind].view(bs, self.num_queries, -1)
+
+        refer_bbox = proposal_logits[batch_ind, topk_ind].view(bs, self.num_queries, -1)
+        enc_bboxes = refer_bbox.sigmoid()
+        if dn_bbox is not None:
+            refer_bbox = torch.cat([dn_bbox, refer_bbox], 1)
+        enc_scores = enc_outputs_scores[batch_ind, topk_ind].view(bs, self.num_queries, -1)
+
+        embeddings = self.tgt_embed.weight.unsqueeze(0).repeat(bs, 1, 1) if self.learnt_init_query else top_k_features
+        if self.training:
+            refer_bbox = refer_bbox.detach()
+            if not self.learnt_init_query:
+                embeddings = embeddings.detach()
+        if dn_embed is not None:
+            embeddings = torch.cat([dn_embed, embeddings], 1)
+
+        return embeddings, refer_bbox, enc_bboxes, enc_scores
+
+
+class RTDETRDecoder_MSAQE(RTDETRDecoder):
+    """RT-DETR decoder with multi-factor small-object-aware query enhancement."""
+
+    def __init__(
+            self,
+            nc=80,
+            ch=(512, 1024, 2048),
+            hd=256,
+            nq=300,
+            ndp=4,
+            nh=8,
+            ndl=6,
+            query_small_alpha=0.05,
+            query_level_beta=0.03,
+            query_quality_gamma=0.02,
+            query_cls_ratio=0.7,
+            d_ffn=1024,
+            eval_idx=-1,
+            dropout=0.,
+            act=nn.ReLU(),
+            nd=100,
+            label_noise_ratio=0.5,
+            box_noise_scale=1.0,
+            learnt_init_query=False):
+        super().__init__(nc, ch, hd, nq, ndp, nh, ndl, d_ffn, eval_idx, dropout, act, nd, label_noise_ratio,
+                         box_noise_scale, learnt_init_query)
+        self.query_small_alpha = query_small_alpha
+        self.query_level_beta = query_level_beta
+        self.query_quality_gamma = query_quality_gamma
+        self.query_cls_ratio = query_cls_ratio
+
+    @staticmethod
+    def _get_level_prior(shapes, bs, dtype, device):
+        """Build a P3/P4/P5-like prior where shallower levels receive a mild bonus."""
+        priors = []
+        denom = max(len(shapes) - 1, 1)
+        for i, (h, w) in enumerate(shapes):
+            value = float(len(shapes) - 1 - i) / denom
+            priors.append(torch.full((h * w,), value, dtype=dtype, device=device))
+        return torch.cat(priors, 0).unsqueeze(0).repeat(bs, 1)
+
+    def _get_decoder_input(self, feats, shapes, dn_embed=None, dn_bbox=None):
+        """Select decoder queries by combining confidence, scale, level and localization cues."""
+        bs = len(feats)
+        anchors, valid_mask = self._generate_anchors(shapes, dtype=feats.dtype, device=feats.device)
+        features = self.enc_output(valid_mask * feats)  # bs, h*w, 256
+
+        enc_outputs_scores = self.enc_score_head(features)  # (bs, h*w, nc)
+        proposal_delta = self.enc_bbox_head(features)
+        proposal_logits = proposal_delta + anchors
+        proposal_bbox = proposal_logits.sigmoid()
+        valid = valid_mask.squeeze(-1)
+
+        cls_score = enc_outputs_scores.sigmoid().max(-1).values
+        cls_score = cls_score.masked_fill(~valid, -float('inf'))
+
+        proposal_area = proposal_bbox[..., 2].clamp(min=1e-6) * proposal_bbox[..., 3].clamp(min=1e-6)
+        small_prior = 1.0 - torch.sqrt(proposal_area).clamp(max=1.0)
+        level_prior = self._get_level_prior(shapes, bs, feats.dtype, feats.device)
+        loc_quality = torch.exp(-proposal_delta.abs().mean(-1)).clamp(0.0, 1.0)
+
+        enhanced_score = cls_score + self.query_small_alpha * small_prior + \
+            self.query_level_beta * level_prior + self.query_quality_gamma * loc_quality
+        enhanced_score = enhanced_score.masked_fill(~valid, -float('inf'))
+
+        # Keep most queries selected by classification confidence, then fill the rest with
+        # enhanced small-object-aware candidates to avoid over-biasing toward noisy tiny regions.
+        num_cls_queries = int(round(self.num_queries * self.query_cls_ratio))
+        num_cls_queries = min(max(num_cls_queries, 1), self.num_queries)
+        num_enhanced_queries = self.num_queries - num_cls_queries
+
+        cls_topk = torch.topk(cls_score, num_cls_queries, dim=1).indices
+        if num_enhanced_queries > 0:
+            enhanced_score = enhanced_score.scatter(1, cls_topk, -float('inf'))
+            enhanced_topk = torch.topk(enhanced_score, num_enhanced_queries, dim=1).indices
+            topk_ind = torch.cat([cls_topk, enhanced_topk], 1).view(-1)
+        else:
+            topk_ind = cls_topk.view(-1)
+
+        batch_ind = torch.arange(end=bs, dtype=topk_ind.dtype, device=feats.device).unsqueeze(-1).repeat(
+            1, self.num_queries).view(-1)
+
+        top_k_features = features[batch_ind, topk_ind].view(bs, self.num_queries, -1)
+        refer_bbox = proposal_logits[batch_ind, topk_ind].view(bs, self.num_queries, -1)
+
+        enc_bboxes = refer_bbox.sigmoid()
+        if dn_bbox is not None:
+            refer_bbox = torch.cat([dn_bbox, refer_bbox], 1)
+        enc_scores = enc_outputs_scores[batch_ind, topk_ind].view(bs, self.num_queries, -1)
+
+        embeddings = self.tgt_embed.weight.unsqueeze(0).repeat(bs, 1, 1) if self.learnt_init_query else top_k_features
+        if self.training:
+            refer_bbox = refer_bbox.detach()
+            if not self.learnt_init_query:
+                embeddings = embeddings.detach()
+        if dn_embed is not None:
+            embeddings = torch.cat([dn_embed, embeddings], 1)
+
+        return embeddings, refer_bbox, enc_bboxes, enc_scores

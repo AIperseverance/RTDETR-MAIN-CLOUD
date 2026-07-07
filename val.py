@@ -24,7 +24,7 @@ if __name__ == '__main__':
                       imgsz=640,
                       batch=4,
                     #   save_json=True, # if you need to cal coco metrice
-                      project='runs/val',
+                      project='/home/waas/results/val',
                       name='exp_2026_06_23_rtdetr-CascadedGroupAttention_300epoch',
                       )
     if model.task == 'detect': # 仅目标检测任务适用

@@ -1,0 +1,46 @@
+# Ultralytics YOLO, AGPL-3.0 license
+# RT-DETR-r18 with FreqFFPN, Cascaded Group Attention AIFI, and multi-factor small-object-aware query enhancement.
+
+# Parameters
+nc: 80
+scales:
+  # [depth, width, max_channels]
+  l: [1.00, 1.00, 1024]
+
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, ConvNormLayer, [32, 3, 2, None, False, 'relu']] # 0-P1/2
+  - [-1, 1, ConvNormLayer, [32, 3, 1, None, False, 'relu']] # 1
+  - [-1, 1, ConvNormLayer, [64, 3, 1, None, False, 'relu']] # 2
+  - [-1, 1, nn.MaxPool2d, [3, 2, 1]] # 3-P2/4
+
+  # [ch_out, block_type, block_nums, stage_num, act, variant]
+  - [-1, 1, Blocks, [64, BasicBlock, 2, 2, 'relu']] # 4
+  - [-1, 1, Blocks, [128, BasicBlock, 2, 3, 'relu']] # 5-P3/8
+  - [-1, 1, Blocks, [256, BasicBlock, 2, 4, 'relu']] # 6-P4/16
+  - [-1, 1, Blocks, [512, BasicBlock, 2, 5, 'relu']] # 7-P5/32
+
+head:
+  - [-1, 1, Conv, [256, 1, 1, None, 1, 1, False]] # 8 input_proj.2
+  - [-1, 1, TransformerEncoderLayer_LocalWindowAttention, [1024, 4]] # 9 Cascaded Group Attention AIFI
+  - [-1, 1, Conv, [256, 1, 1]] # 10, Y5, lateral_convs.0 P5/32
+
+  - [6, 1, Conv, [256, 1]] # 11 P4/16
+  - [5, 1, Conv, [256, 1]] # 12 P3/8
+
+  - [[11, 10], 1, FreqFusion, []] # 13 P4/16
+  - [-1, 3, RepC3, [256, 0.5]] # 14
+  - [-1, 1, Conv, [256, 1, 1]] # 15, Y4
+
+  - [[12, -1], 1, FreqFusion, []] # 16 P3/8
+  - [-1, 3, RepC3, [256, 0.5]] # 17, X3
+
+  - [-1, 1, Conv, [256, 3, 2]] # 18, downsample_convs.0
+  - [[-1, 15], 1, Concat, [1]] # 19 cat Y4
+  - [-1, 3, RepC3, [256, 0.5]] # F4 (20), pan_blocks.0
+
+  - [-1, 1, Conv, [256, 3, 2]] # 21, downsample_convs.1
+  - [[-1, 10], 1, Concat, [1]] # 22 cat Y5
+  - [-1, 3, RepC3, [256, 0.5]] # F5 (23), pan_blocks.1
+
+  - [[17, 20, 23], 1, RTDETRDecoder_MSAQE, [nc, 256, 300, 4, 8, 3, 0.05, 0.03, 0.02, 0.7]] # Detect(P3, P4, P5)
