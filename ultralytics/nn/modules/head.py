@@ -14,7 +14,8 @@ from .conv import Conv
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
 from .utils import bias_init_with_prob, linear_init_
 
-__all__ = 'Detect', 'Segment', 'Pose', 'Classify', 'RTDETRDecoder', 'RTDETRDecoder_SAQE', 'RTDETRDecoder_MSAQE'
+__all__ = 'Detect', 'Segment', 'Pose', 'Classify', 'RTDETRDecoder', 'RTDETRDecoder_SAQE', 'RTDETRDecoder_MSAQE', \
+    'RTDETRDecoder_GatedScaleSAQE'
 
 
 class Detect(nn.Module):
@@ -370,6 +371,7 @@ class RTDETRDecoder(nn.Module):
 
         return embeddings, refer_bbox, enc_bboxes, enc_scores
 
+
     # TODO
     def _reset_parameters(self):
         """Initializes or resets the parameters of the model's various components with predefined weights and biases."""
@@ -394,6 +396,121 @@ class RTDETRDecoder(nn.Module):
         xavier_uniform_(self.query_pos_head.layers[1].weight)
         for layer in self.input_proj:
             xavier_uniform_(layer[0].weight)
+
+
+class RTDETRDecoder_GatedScaleSAQE(RTDETRDecoder):
+    """RT-DETR decoder with confidence-gated scale-aware query selection."""
+
+    def __init__(
+            self,
+            nc=80,
+            ch=(512, 1024, 2048),
+            hd=256,
+            nq=300,
+            ndp=4,
+            nh=8,
+            ndl=6,
+            query_scale_alpha=0.03,
+            query_level_beta=0.01,
+            query_quality_gamma=0.01,
+            query_cls_ratio=0.9,
+            query_gate_ratio=3.0,
+            scale_mu=0.08,
+            scale_sigma=0.05,
+            d_ffn=1024,
+            eval_idx=-1,
+            dropout=0.,
+            act=nn.ReLU(),
+            nd=100,
+            label_noise_ratio=0.5,
+            box_noise_scale=1.0,
+            learnt_init_query=False):
+        super().__init__(nc, ch, hd, nq, ndp, nh, ndl, d_ffn, eval_idx, dropout, act, nd, label_noise_ratio,
+                         box_noise_scale, learnt_init_query)
+        self.query_scale_alpha = query_scale_alpha
+        self.query_level_beta = query_level_beta
+        self.query_quality_gamma = query_quality_gamma
+        self.query_cls_ratio = query_cls_ratio
+        self.query_gate_ratio = query_gate_ratio
+        self.scale_mu = scale_mu
+        self.scale_sigma = scale_sigma
+
+    @staticmethod
+    def _get_level_prior(shapes, bs, dtype, device):
+        """Build a P3/P4/P5-like prior where shallower levels receive a mild bonus."""
+        priors = []
+        denom = max(len(shapes) - 1, 1)
+        for i, (h, w) in enumerate(shapes):
+            value = float(len(shapes) - 1 - i) / denom
+            priors.append(torch.full((h * w,), value, dtype=dtype, device=device))
+        return torch.cat(priors, 0).unsqueeze(0).repeat(bs, 1)
+
+    def _get_decoder_input(self, feats, shapes, dn_embed=None, dn_bbox=None):
+        """Select queries from a confidence gate using a target-scale prior."""
+        bs = len(feats)
+        anchors, valid_mask = self._generate_anchors(shapes, dtype=feats.dtype, device=feats.device)
+        features = self.enc_output(valid_mask * feats)  # bs, h*w, 256
+
+        enc_outputs_scores = self.enc_score_head(features)  # (bs, h*w, nc)
+        proposal_delta = self.enc_bbox_head(features)
+        proposal_logits = proposal_delta + anchors
+        proposal_bbox = proposal_logits.sigmoid()
+        valid = valid_mask.squeeze(-1)
+
+        cls_score = enc_outputs_scores.sigmoid().max(-1).values
+        cls_score = cls_score.masked_fill(~valid, -float('inf'))
+
+        proposal_area = proposal_bbox[..., 2].clamp(min=1e-6) * proposal_bbox[..., 3].clamp(min=1e-6)
+        proposal_scale = torch.sqrt(proposal_area)
+        sigma = max(float(self.scale_sigma), 1e-6)
+        scale_prior = torch.exp(-((proposal_scale - float(self.scale_mu)) ** 2) / (2 * sigma ** 2))
+        level_prior = self._get_level_prior(shapes, bs, feats.dtype, feats.device)
+        loc_quality = torch.exp(-proposal_delta.abs().mean(-1)).clamp(0.0, 1.0)
+
+        enhanced_score = cls_score + self.query_scale_alpha * scale_prior + \
+            self.query_level_beta * level_prior + self.query_quality_gamma * loc_quality
+        enhanced_score = enhanced_score.masked_fill(~valid, -float('inf'))
+
+        num_proposals = cls_score.shape[1]
+        num_cls_queries = int(round(self.num_queries * self.query_cls_ratio))
+        num_cls_queries = min(max(num_cls_queries, 1), self.num_queries)
+        num_enhanced_queries = self.num_queries - num_cls_queries
+
+        cls_topk = torch.topk(cls_score, num_cls_queries, dim=1).indices
+        if num_enhanced_queries > 0:
+            gate_k = int(round(self.num_queries * self.query_gate_ratio))
+            gate_k = min(max(gate_k, self.num_queries), num_proposals)
+            gate_topk = torch.topk(cls_score, gate_k, dim=1).indices
+
+            gated_score = torch.full_like(enhanced_score, -float('inf'))
+            gated_score.scatter_(1, gate_topk, enhanced_score.gather(1, gate_topk))
+            gated_score = gated_score.scatter(1, cls_topk, -float('inf'))
+
+            enhanced_topk = torch.topk(gated_score, num_enhanced_queries, dim=1).indices
+            topk_ind = torch.cat([cls_topk, enhanced_topk], 1).view(-1)
+        else:
+            topk_ind = cls_topk.view(-1)
+
+        batch_ind = torch.arange(end=bs, dtype=topk_ind.dtype, device=feats.device).unsqueeze(-1).repeat(
+            1, self.num_queries).view(-1)
+
+        top_k_features = features[batch_ind, topk_ind].view(bs, self.num_queries, -1)
+        refer_bbox = proposal_logits[batch_ind, topk_ind].view(bs, self.num_queries, -1)
+
+        enc_bboxes = refer_bbox.sigmoid()
+        if dn_bbox is not None:
+            refer_bbox = torch.cat([dn_bbox, refer_bbox], 1)
+        enc_scores = enc_outputs_scores[batch_ind, topk_ind].view(bs, self.num_queries, -1)
+
+        embeddings = self.tgt_embed.weight.unsqueeze(0).repeat(bs, 1, 1) if self.learnt_init_query else top_k_features
+        if self.training:
+            refer_bbox = refer_bbox.detach()
+            if not self.learnt_init_query:
+                embeddings = embeddings.detach()
+        if dn_embed is not None:
+            embeddings = torch.cat([dn_embed, embeddings], 1)
+
+        return embeddings, refer_bbox, enc_bboxes, enc_scores
 
 
 class RTDETRDecoder_SAQE(RTDETRDecoder):
