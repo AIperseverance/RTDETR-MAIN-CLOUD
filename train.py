@@ -4,6 +4,7 @@ import warnings, os
 # 多卡训练参考<使用教程.md>下方常见错误和解决方案
 warnings.filterwarnings('ignore')
 from ultralytics import RTDETR
+from ultralytics.utils.torch_utils import init_seeds
 
 # 深度学习炼丹必备必看必须知道的小技巧！https://www.bilibili.com/video/BV1q3SZYsExc/
 # 整合多个创新点的B站视频链接:
@@ -17,7 +18,8 @@ from ultralytics import RTDETR
 # 但是在val.py的时候精度为0，所以统一改成fp32，原则上没影响，只是存储的位数变多了。
 
 if __name__ == '__main__':
-    model = RTDETR('/home/waas/workspace/RTDETR-MAIN-CLOUD/ultralytics/cfg/models/rt-detr/rtdetr-FreqFFPN-CascadedGroupAttention.yaml')
+    init_seeds(0, deterministic=True)
+    model = RTDETR('/home/waas/workspace/RTDETR-MAIN-CLOUD/ultralytics/cfg/models/rt-detr/rtdetr-GEIT-ProgressiveResidual.yaml')
     model.load('/home/waas/weights/rtdetr-r18.pt') # loading pretrain weights
     model.train(data='/home/waas/datasets/data.yaml',
                 cache=False,
@@ -25,9 +27,13 @@ if __name__ == '__main__':
                 epochs=300,
                 batch=4, # batchsize 不建议乱动，一般来说4的效果都是最好的，越大的batch效果会很差(经验之谈)
                 workers=4, # Windows下出现莫名其妙卡主的情况可以尝试把workers设置为0
+                optimizer='AdamW',
+                seed=0,
+                deterministic=True,
+                amp=False,
                 # device='0,1', # 指定显卡和多卡训练参考<使用教程.md>下方常见错误和解决方案
                 # resume='', # last.pt path
                 patience=30, # 设置0代表不早提供，设置30代表精度持续30epoch没有比之前最高的高就早停
                 project='/home/waas/results/train',
-                name='exp_2026_06_24_rtdetr-FreqFFPN-CascadedGroupAttention_300epoch',
+                name='exp_2026_07_20_rtdetr-GEIT-ProgressiveResidual_300epoch',
                 )

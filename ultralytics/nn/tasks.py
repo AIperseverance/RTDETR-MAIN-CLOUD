@@ -446,6 +446,54 @@ class RTDETRDetectionModel(DetectionModel):
         """
         super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
 
+    def load(self, weights, verbose=True):
+        """Load weights with a layer-offset mapping for the progressive residual GEIT variant."""
+        pretrained_mapping = self.yaml.get('pretrained_mapping')
+        if pretrained_mapping == 'rtdetr_r18_geit_progressive_residual':
+            model = weights['model'] if isinstance(weights, dict) else weights
+            source = model.float().state_dict()
+            target = self.state_dict()
+            source_yaml = getattr(model, 'yaml', {})
+            source_mapping = source_yaml.get('pretrained_mapping') if isinstance(source_yaml, dict) else None
+            source_is_progressive = source_mapping == 'rtdetr_r18_geit_progressive_residual' or \
+                any(k.startswith('model.8.sobel_x.') for k in source)
+
+            if source_is_progressive:
+                mapped = intersect_dicts(source, target)
+                self.load_state_dict(mapped, strict=False)
+                if verbose:
+                    mapped_params = sum(v.numel() for v in mapped.values())
+                    target_params = sum(v.numel() for v in target.values())
+                    LOGGER.info(
+                        f'GEIT ProgressiveResidual direct transfer: transferred {len(mapped)}/{len(target)} tensors, '
+                        f'{mapped_params}/{target_params} params ({mapped_params / target_params * 100:.2f}%)')
+                return
+
+            mapped = {}
+            for k, v in source.items():
+                new_key = None
+                if k.startswith('model.'):
+                    parts = k.split('.', 2)
+                    if len(parts) == 3 and parts[1].isdigit():
+                        layer_idx = int(parts[1])
+                        if 0 <= layer_idx <= 7:
+                            new_key = k
+                        elif 8 <= layer_idx:
+                            new_key = f'model.{layer_idx + 5}.{parts[2]}'
+                if new_key in target and target[new_key].shape == v.shape:
+                    mapped[new_key] = v
+
+            self.load_state_dict(mapped, strict=False)
+            if verbose:
+                mapped_params = sum(v.numel() for v in mapped.values())
+                target_params = sum(v.numel() for v in target.values())
+                LOGGER.info(
+                    f'GEIT ProgressiveResidual R18 mapping: transferred {len(mapped)}/{len(target)} tensors, '
+                    f'{mapped_params}/{target_params} params ({mapped_params / target_params * 100:.2f}%)')
+            return
+
+        super().load(weights, verbose=verbose)
+
     def init_criterion(self):
         """Initialize the loss criterion for the RTDETRDetectionModel."""
         from ultralytics.models.utils.loss import RTDETRDetectionLoss
@@ -1007,6 +1055,14 @@ def parse_model(d, ch, verbose=True, warehouse_manager=None):  # model_dict, inp
             args = [c1]
         elif m in {GetIndexOutput}:
             c2 = ch[f][args[0]]
+        elif m in {ProgressiveEdgePyramid}:
+            c1 = ch[f]
+            c2 = [make_divisible(min(i, max_channels) * width, 8) for i in args[0]]
+            args = [c1, c2, *args[1:]]
+        elif m in {NormalizedResidualEdgeFusion}:
+            c1 = [ch[x] for x in f]
+            c2 = c1[1]
+            args = [c1, *args]
         elif m in {RCM}:
             c2 = ch[f]
             args = [c2, *args]
@@ -1096,7 +1152,7 @@ def parse_model(d, ch, verbose=True, warehouse_manager=None):  # model_dict, inp
         else:
             c2 = ch[f]
 
-        if isinstance(c2, list) and m not in {ChannelTransformer, PyramidContextExtraction, CrossLayerChannelAttention, CrossLayerSpatialAttention, MutilScaleEdgeInfoGenetator}:
+        if isinstance(c2, list) and m not in {ChannelTransformer, PyramidContextExtraction, CrossLayerChannelAttention, CrossLayerSpatialAttention, MutilScaleEdgeInfoGenetator, ProgressiveEdgePyramid}:
             is_backbone = True
             m_ = m
             m_.backbone = True
@@ -1112,7 +1168,7 @@ def parse_model(d, ch, verbose=True, warehouse_manager=None):  # model_dict, inp
         layers.append(m_)
         if i == 0:
             ch = []
-        if isinstance(c2, list) and m not in {ChannelTransformer, PyramidContextExtraction, CrossLayerChannelAttention, CrossLayerSpatialAttention, MutilScaleEdgeInfoGenetator}:
+        if isinstance(c2, list) and m not in {ChannelTransformer, PyramidContextExtraction, CrossLayerChannelAttention, CrossLayerSpatialAttention, MutilScaleEdgeInfoGenetator, ProgressiveEdgePyramid}:
             ch.extend(c2)
             for _ in range(5 - len(ch)):
                 ch.insert(0, 0)

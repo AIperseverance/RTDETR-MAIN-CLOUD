@@ -134,7 +134,7 @@ __all__ = ['Ghost_HGBlock', 'Rep_HGBlock', 'DWRC3', 'C3_DWR', 'C2f_DWR', 'BasicB
            'DynamicInterpolationFusion', 'FuseBlockMulti', 'C2f_FMB', 'gConvC3', 'C2f_gConv', 'LDConv', 'BasicBlock_WDBB', 'BottleNeck_WDBB', 'BasicBlock_DeepDBB', 'BottleNeck_DeepDBB',
            'C2f_AdditiveBlock', 'C2f_AdditiveBlock_CGLU', 'CSP_MSCB', 'EUCB', 'C2f_MSMHSA_CGLU', 'CSP_PMSFA', 'C2f_MogaBlock', 'C2f_SHSA', 'C2f_SHSA_CGLU', 'C2f_SMAFB', 'C2f_SMAFB_CGLU',
            'DynamicAlignFusion', 'CSP_MutilScaleEdgeInformationEnhance', 'C2f_FFCM', 'C2f_SFHF', 'CSP_FreqSpatial', 'C2f_MSM', 'CSP_MutilScaleEdgeInformationSelect', 'C2f_HDRAB', 'C2f_RAB',
-           'LFEC3', 'MutilScaleEdgeInfoGenetator', 'ConvEdgeFusion', 'C2f_FCA', 'C2f_CAMixer', 'HyperComputeModule', 'MANet', 'MANet_FasterBlock', 'MANet_FasterCGLU', 'MANet_Star', 'MultiScaleGatedAttn',
+           'LFEC3', 'MutilScaleEdgeInfoGenetator', 'ConvEdgeFusion', 'ProgressiveEdgePyramid', 'NormalizedResidualEdgeFusion', 'C2f_FCA', 'C2f_CAMixer', 'HyperComputeModule', 'MANet', 'MANet_FasterBlock', 'MANet_FasterCGLU', 'MANet_Star', 'MultiScaleGatedAttn',
            'C2f_HFERB', 'C2f_DTAB', 'DTAB', 'C2f_JDPM', 'C2f_ETB', 'ETB', 'C2f_FDT', 'FDT', 'WFU', 'PSConv', 'C2f_AP', 'ContrastDrivenFeatureAggregation', 'C2f_ELGCA', 'C2f_ELGCA_CGLU',
            'C2f_Strip', 'C2f_StripCGLU', 'MultiScalePCA', 'FSA', 'MultiScalePCA_Down', 'C2f_KAT', 'C2f_Faster_KAN', 'C2f_DCMB', 'C2f_DCMB_KAN', 'C2f_GlobalFilter', 'C2f_DynamicFilter', 'HAFB',
            'C2f_SAVSS', 'C2f_MambaOut', 'C2f_EfficientVIM', 'C2f_EfficientVIM_CGLU', 'EUCB_SC', 'CSP_MSCB_SC', 'C2f_MambaOut_UniRepLK', 'CrossAttentionBlock', 'C2f_IEL', 'IELC3', 'C2f_RCB',
@@ -8719,6 +8719,51 @@ class ConvEdgeFusion(nn.Module):
         x = torch.cat(x, dim=1)
         x = self.conv_1x1(self.conv_3x3_feature_extract(self.conv_channel_fusion(x)))
         return x
+
+class ProgressiveEdgePyramid(nn.Module):
+    def __init__(self, inc, oucs, eps=1e-6) -> None:
+        super().__init__()
+        self.eps = eps
+        sobel = torch.tensor([[1, 2, 1], [0, 0, 0], [-1, -2, -1]], dtype=torch.float32)
+        kernel_y = sobel.view(1, 1, 3, 3).repeat(inc, 1, 1, 1)
+        kernel_x = sobel.t().view(1, 1, 3, 3).repeat(inc, 1, 1, 1)
+        self.sobel_x = nn.Conv2d(inc, inc, kernel_size=3, padding=1, groups=inc, bias=False)
+        self.sobel_y = nn.Conv2d(inc, inc, kernel_size=3, padding=1, groups=inc, bias=False)
+        self.sobel_x.weight.data.copy_(kernel_x)
+        self.sobel_y.weight.data.copy_(kernel_y)
+        for p in self.sobel_x.parameters():
+            p.requires_grad_(False)
+        for p in self.sobel_y.parameters():
+            p.requires_grad_(False)
+        self.maxpool = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.conv_1x1s = nn.ModuleList(Conv(inc, ouc, 1) for ouc in oucs)
+
+    def forward(self, x):
+        edge = torch.sqrt(self.sobel_x(x).pow(2) + self.sobel_y(x).pow(2) + self.eps)
+        outputs = []
+        for conv in self.conv_1x1s:
+            edge = self.maxpool(edge)
+            outputs.append(conv(edge))
+        return outputs
+
+class NormalizedResidualEdgeFusion(nn.Module):
+    def __init__(self, inc, alpha=0.1, eps=1e-6) -> None:
+        super().__init__()
+        edge_c, main_c = inc
+        self.alpha = float(alpha)
+        self.eps = eps
+        self.edge_align = Conv(edge_c, main_c, 1, act=False) if edge_c != main_c else nn.Identity()
+
+    def forward(self, x):
+        edge, main = x
+        edge = self.edge_align(edge)
+        if edge.shape[-2:] != main.shape[-2:]:
+            edge = F.interpolate(edge, size=main.shape[-2:], mode='nearest')
+        dims = (1, 2, 3)
+        main_rms = main.detach().float().pow(2).mean(dim=dims, keepdim=True).sqrt()
+        edge_rms = edge.detach().float().pow(2).mean(dim=dims, keepdim=True).sqrt()
+        scale = (main_rms / (edge_rms + self.eps)).clamp(max=1.0).to(dtype=edge.dtype)
+        return main + self.alpha * scale * edge
 
 ######################################## GlobalEdgeInformationTransfer end ########################################
 

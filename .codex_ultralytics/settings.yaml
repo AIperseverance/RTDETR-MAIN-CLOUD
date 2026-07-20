@@ -1,0 +1,16 @@
+settings_version: 0.0.4
+datasets_dir: D:\RT-DETR\datasets
+weights_dir: D:\RT-DETR\RTDETR-main-cloud\weights
+runs_dir: D:\RT-DETR\RTDETR-main-cloud\runs
+uuid: 173f9369b451307ff8ac9c9a931dd8618d36626efb7148df06420df465868677
+sync: true
+api_key: ''
+clearml: true
+comet: true
+dvc: true
+hub: true
+mlflow: true
+neptune: true
+raytune: true
+tensorboard: true
+wandb: true
