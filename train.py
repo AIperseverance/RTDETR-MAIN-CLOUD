@@ -19,7 +19,7 @@ from ultralytics.utils.torch_utils import init_seeds
 
 if __name__ == '__main__':
     init_seeds(0, deterministic=True)
-    model = RTDETR('/home/waas/workspace/RTDETR-MAIN-CLOUD/ultralytics/cfg/models/rt-detr/rtdetr-GEIT-ProgressiveResidual.yaml')
+    model = RTDETR('/home/waas/workspace/RTDETR-MAIN-CLOUD/ultralytics/cfg/models/rt-detr/rtdetr-GlobalEdgeInformationTransfer1-PretrainedMapped.yaml')
     model.load('/home/waas/weights/rtdetr-r18.pt') # loading pretrain weights
     model.train(data='/home/waas/datasets/data.yaml',
                 cache=False,
@@ -35,5 +35,5 @@ if __name__ == '__main__':
                 # resume='', # last.pt path
                 patience=30, # 设置0代表不早提供，设置30代表精度持续30epoch没有比之前最高的高就早停
                 project='/home/waas/results/train',
-                name='exp_2026_07_20_rtdetr-GEIT-ProgressiveResidual_300epoch',
+                name='exp_2026_07_21_rtdetr-GlobalEdgeInformationTransfer1-PretrainedMapped_300epoch',
                 )

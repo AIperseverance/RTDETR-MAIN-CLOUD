@@ -492,6 +492,58 @@ class RTDETRDetectionModel(DetectionModel):
                     f'{mapped_params}/{target_params} params ({mapped_params / target_params * 100:.2f}%)')
             return
 
+        if pretrained_mapping == 'rtdetr_r18_geit1':
+            model = weights['model'] if isinstance(weights, dict) else weights
+            source = model.float().state_dict()
+            target = self.state_dict()
+            source_yaml = getattr(model, 'yaml', {})
+            source_mapping = source_yaml.get('pretrained_mapping') if isinstance(source_yaml, dict) else None
+            source_is_geit1 = source_mapping == 'rtdetr_r18_geit1' or \
+                any(k.startswith('model.4.sc.sobel_kernel_') for k in source) or \
+                any(k.startswith('model.10.conv_channel_fusion.') for k in source)
+
+            if source_is_geit1:
+                mapped = intersect_dicts(source, target)
+                self.load_state_dict(mapped, strict=False)
+                if verbose:
+                    mapped_params = sum(v.numel() for v in mapped.values())
+                    target_params = sum(v.numel() for v in target.values())
+                    LOGGER.info(
+                        f'GEIT1 direct transfer: transferred {len(mapped)}/{len(target)} tensors, '
+                        f'{mapped_params}/{target_params} params ({mapped_params / target_params * 100:.2f}%)')
+                return
+
+            mapped = {}
+            for k, v in source.items():
+                new_key = None
+                if k.startswith('model.'):
+                    parts = k.split('.', 2)
+                    if len(parts) == 3 and parts[1].isdigit():
+                        layer_idx = int(parts[1])
+                        if 0 <= layer_idx <= 3:
+                            new_key = k
+                        elif layer_idx == 4:
+                            new_key = f'model.8.{parts[2]}'
+                        elif layer_idx == 5:
+                            new_key = f'model.9.{parts[2]}'
+                        elif layer_idx == 6:
+                            new_key = f'model.11.{parts[2]}'
+                        elif layer_idx == 7:
+                            new_key = f'model.13.{parts[2]}'
+                        elif 8 <= layer_idx:
+                            new_key = f'model.{layer_idx + 7}.{parts[2]}'
+                if new_key in target and target[new_key].shape == v.shape:
+                    mapped[new_key] = v
+
+            self.load_state_dict(mapped, strict=False)
+            if verbose:
+                mapped_params = sum(v.numel() for v in mapped.values())
+                target_params = sum(v.numel() for v in target.values())
+                LOGGER.info(
+                    f'GEIT1 R18 mapping: transferred {len(mapped)}/{len(target)} tensors, '
+                    f'{mapped_params}/{target_params} params ({mapped_params / target_params * 100:.2f}%)')
+            return
+
         super().load(weights, verbose=verbose)
 
     def init_criterion(self):
