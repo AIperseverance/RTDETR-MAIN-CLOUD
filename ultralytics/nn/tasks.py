@@ -544,6 +544,51 @@ class RTDETRDetectionModel(DetectionModel):
                     f'{mapped_params}/{target_params} params ({mapped_params / target_params * 100:.2f}%)')
             return
 
+        if pretrained_mapping == 'rtdetr_r18_hafb1':
+            model = weights['model'] if isinstance(weights, dict) else weights
+            source = model.float().state_dict()
+            target = self.state_dict()
+            source_yaml = getattr(model, 'yaml', {})
+            source_mapping = source_yaml.get('pretrained_mapping') if isinstance(source_yaml, dict) else None
+            source_is_hafb1 = source_mapping == 'rtdetr_r18_hafb1' or \
+                any(k.startswith('model.26.lgb1_local.') for k in source) or \
+                any(k.startswith('model.27.lgb1_local.') for k in source) or \
+                any(k.startswith('model.28.lgb1_local.') for k in source)
+
+            if source_is_hafb1:
+                mapped = intersect_dicts(source, target)
+                self.load_state_dict(mapped, strict=False)
+                if verbose:
+                    mapped_params = sum(v.numel() for v in mapped.values())
+                    target_params = sum(v.numel() for v in target.values())
+                    LOGGER.info(
+                        f'HAFB1 direct transfer: transferred {len(mapped)}/{len(target)} tensors, '
+                        f'{mapped_params}/{target_params} params ({mapped_params / target_params * 100:.2f}%)')
+                return
+
+            mapped = {}
+            for k, v in source.items():
+                new_key = None
+                if k.startswith('model.'):
+                    parts = k.split('.', 2)
+                    if len(parts) == 3 and parts[1].isdigit():
+                        layer_idx = int(parts[1])
+                        if 0 <= layer_idx <= 25:
+                            new_key = k
+                        elif layer_idx == 26:
+                            new_key = f'model.29.{parts[2]}'
+                if new_key in target and target[new_key].shape == v.shape:
+                    mapped[new_key] = v
+
+            self.load_state_dict(mapped, strict=False)
+            if verbose:
+                mapped_params = sum(v.numel() for v in mapped.values())
+                target_params = sum(v.numel() for v in target.values())
+                LOGGER.info(
+                    f'HAFB1 R18 mapping: transferred {len(mapped)}/{len(target)} tensors, '
+                    f'{mapped_params}/{target_params} params ({mapped_params / target_params * 100:.2f}%)')
+            return
+
         super().load(weights, verbose=verbose)
 
     def init_criterion(self):
